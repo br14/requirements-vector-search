@@ -33,6 +33,7 @@ class RequirementsCLI {
       .option('--clear', 'Clear existing index before indexing', false)
       .option('--dry-run', 'Show files that would be indexed without processing', false)
       .option('-y, --yes', 'Skip confirmation prompts', false)
+      .option('--debug', 'Enable debug mode during indexing', false)
       .action(this.indexCommand.bind(this));
 
     // Search command
@@ -43,13 +44,34 @@ class RequirementsCLI {
       .option('-i, --index-path <path>', 'Path to vector index', './requirements-index')
       .option('-n, --num-results <number>', 'Number of results to return', '5')
       .option('-j, --json', 'Output results in JSON format', false)
+      .option('--debug', 'Enable debug mode for search', false)
+      .option('--text-matches', 'Include direct text matching analysis', false)
+      .option('--min-score <number>', 'Minimum relevance score (0-1)', '0')
       .action(this.searchCommand.bind(this));
+
+    // Enhanced search analysis command
+    this.program
+      .command('analyze')
+      .description('Perform detailed search analysis with debugging')
+      .argument('<query>', 'Search query to analyze')
+      .option('-i, --index-path <path>', 'Path to vector index', './requirements-index')
+      .action(this.analyzeCommand.bind(this));
+
+    // Find exact text command
+    this.program
+      .command('find-text')
+      .description('Find all chunks containing exact text')
+      .argument('<text>', 'Text to search for exactly')
+      .option('-i, --index-path <path>', 'Path to vector index', './requirements-index')
+      .option('--case-sensitive', 'Case sensitive search', false)
+      .action(this.findTextCommand.bind(this));
 
     // Interactive mode
     this.program
       .command('interactive')
       .description('Start interactive search session')
       .option('-i, --index-path <path>', 'Path to vector index', './requirements-index')
+      .option('--debug', 'Enable debug mode in interactive session', false)
       .action(this.interactiveCommand.bind(this));
 
     // Status command
@@ -83,9 +105,18 @@ class RequirementsCLI {
       .option('-i, --index-path <path>', 'Path to vector index', './requirements-index')
       .option('-y, --yes', 'Skip confirmation prompt', false)
       .action(this.restoreCommand.bind(this));
+
+    // Debug command for troubleshooting
+    this.program
+      .command('debug')
+      .description('Debug search issues and analyze index')
+      .argument('<query>', 'Query to debug')
+      .option('-i, --index-path <path>', 'Path to vector index', './requirements-index')
+      .option('--find-text <text>', 'Also search for exact text matches')
+      .action(this.debugCommand.bind(this));
   }
 
-  async initializeSearchEngine(indexPath) {
+  async initializeSearchEngine(indexPath, debug = false) {
     if (!this.searchEngine || this.searchEngine.indexPath !== indexPath) {
       const apiKey = process.env.OPENAI_API_KEY;
       if (!apiKey) {
@@ -94,6 +125,9 @@ class RequirementsCLI {
         process.exit(1);
       }
       this.searchEngine = new RequirementsSearchEngine(indexPath, apiKey);
+      if (debug) {
+        this.searchEngine.setDebugMode(true);
+      }
     }
     return this.searchEngine;
   }
@@ -186,7 +220,7 @@ class RequirementsCLI {
     }
 
     // Initialize search engine
-    const searchEngine = await this.initializeSearchEngine(options.indexPath);
+    const searchEngine = await this.initializeSearchEngine(options.indexPath, options.debug);
 
     // Clear index if requested
     if (options.clear) {
@@ -212,15 +246,29 @@ class RequirementsCLI {
       const relativePath = path.relative(process.cwd(), file);
       const progress = `[${i + 1}/${files.length}]`;
       
-      const fileSpinner = ora(`${progress} Processing ${relativePath}...`).start();
+      if (!options.debug) {
+        var fileSpinner = ora(`${progress} Processing ${relativePath}...`).start();
+      } else {
+        console.log(`${progress} Processing ${relativePath}...`);
+      }
       
       try {
         const result = await searchEngine.indexDocument(file);
-        fileSpinner.succeed(`${progress} ✅ ${relativePath} (${result.chunksCreated} chunks)`);
+        
+        if (!options.debug) {
+          fileSpinner.succeed(`${progress} ✅ ${relativePath} (${result.chunksCreated} chunks)`);
+        } else {
+          console.log(`${progress} ✅ ${relativePath} (${result.chunksCreated} chunks)`);
+        }
+        
         successCount++;
         totalChunks += result.chunksCreated;
       } catch (error) {
-        fileSpinner.fail(`${progress} ❌ ${relativePath}`);
+        if (!options.debug) {
+          fileSpinner.fail(`${progress} ❌ ${relativePath}`);
+        } else {
+          console.log(`${progress} ❌ ${relativePath}`);
+        }
         console.log(chalk.red(`   Error: ${error.message}`));
         errorCount++;
       }
@@ -237,7 +285,7 @@ class RequirementsCLI {
   }
 
   async searchCommand(query, options) {
-    const searchEngine = await this.initializeSearchEngine(options.indexPath);
+    const searchEngine = await this.initializeSearchEngine(options.indexPath, options.debug);
     
     try {
       // Check if index exists
@@ -251,27 +299,97 @@ class RequirementsCLI {
       process.exit(1);
     }
 
-    const spinner = ora(`🔍 Searching for: "${query}"`).start();
+    if (!options.debug) {
+      var spinner = ora(`🔍 Searching for: "${query}"`).start();
+    } else {
+      console.log(`🔍 Searching for: "${query}"`);
+    }
     
     try {
-      const results = await searchEngine.search(query, parseInt(options.numResults));
-      spinner.stop();
+      const searchOptions = {
+        debug: options.debug,
+        includeTextMatches: options.textMatches,
+        minScore: parseFloat(options.minScore)
+      };
+      
+      const results = await searchEngine.search(query, parseInt(options.numResults), searchOptions);
+      
+      if (!options.debug) {
+        spinner.stop();
+      }
 
       if (options.json) {
         console.log(JSON.stringify(results, null, 2));
         return;
       }
 
-      this.displaySearchResults(query, results);
+      this.displaySearchResults(query, results, options.textMatches);
     } catch (error) {
-      spinner.fail('❌ Search failed');
+      if (!options.debug) {
+        spinner.fail('❌ Search failed');
+      }
       console.log(chalk.red(error.message));
       process.exit(1);
     }
   }
 
-  async interactiveCommand(options) {
+  async analyzeCommand(query, options) {
+    console.log(chalk.blue(`🔍 Analyzing search for: "${query}"\n`));
+    
     const searchEngine = await this.initializeSearchEngine(options.indexPath);
+    
+    try {
+      await searchEngine.analyzeSearch(query);
+    } catch (error) {
+      console.log(chalk.red(`❌ Analysis failed: ${error.message}`));
+      process.exit(1);
+    }
+  }
+
+  async findTextCommand(text, options) {
+    console.log(chalk.blue(`🔍 Finding exact text: "${text}"\n`));
+    
+    const searchEngine = await this.initializeSearchEngine(options.indexPath);
+    
+    try {
+      await searchEngine.findExactText(text, options.caseSensitive);
+    } catch (error) {
+      console.log(chalk.red(`❌ Text search failed: ${error.message}`));
+      process.exit(1);
+    }
+  }
+
+  async debugCommand(query, options) {
+    console.log(chalk.blue(`🐛 Debug Mode: Analyzing "${query}"\n`));
+    
+    const searchEngine = await this.initializeSearchEngine(options.indexPath);
+    
+    try {
+      // First, analyze the search
+      console.log(chalk.yellow('=== SEARCH ANALYSIS ==='));
+      await searchEngine.analyzeSearch(query);
+      
+      // If specific text is provided, also search for exact matches
+      if (options.findText) {
+        console.log(chalk.yellow('\n=== EXACT TEXT SEARCH ==='));
+        await searchEngine.findExactText(options.findText);
+      }
+      
+      // Provide recommendations
+      console.log(chalk.yellow('\n=== RECOMMENDATIONS ==='));
+      console.log('• Try using more specific terms from your documents');
+      console.log('• Use the "find-text" command to verify text is indexed correctly');
+      console.log('• Check if documents were processed correctly during indexing');
+      console.log('• Consider re-indexing with --debug flag to see processing details');
+      
+    } catch (error) {
+      console.log(chalk.red(`❌ Debug failed: ${error.message}`));
+      process.exit(1);
+    }
+  }
+
+  async interactiveCommand(options) {
+    const searchEngine = await this.initializeSearchEngine(options.indexPath, options.debug);
     
     try {
       const stats = await searchEngine.getStats();
@@ -281,44 +399,78 @@ class RequirementsCLI {
       }
       console.log(chalk.blue('🔍 Interactive Requirements Search'));
       console.log(chalk.gray(`📊 Index contains ${stats.totalChunks} chunks from ${stats.totalDocuments} documents\n`));
+      
+      if (options.debug) {
+        console.log(chalk.yellow('🐛 Debug mode enabled\n'));
+      }
     } catch (error) {
       console.log(chalk.red('❌ No index found. Run "requirements-search index" first.'));
       process.exit(1);
     }
 
-    await this.interactiveSearch(searchEngine);
+    await this.interactiveSearch(searchEngine, options.debug);
   }
 
-  async interactiveSearch(searchEngine) {
+  async interactiveSearch(searchEngine, debug = false) {
     while (true) {
-      const { query } = await inquirer.prompt([{
-        type: 'input',
-        name: 'query',
-        message: 'Enter search query (or "exit" to quit):',
-        validate: input => input.trim().length > 0 || 'Please enter a search query'
-      }]);
+      const { query, action } = await inquirer.prompt([
+        {
+          type: 'input',
+          name: 'query',
+          message: 'Enter search query (or "exit" to quit):',
+          validate: input => input.trim().length > 0 || 'Please enter a search query'
+        },
+        {
+          type: 'list',
+          name: 'action',
+          message: 'What would you like to do?',
+          choices: [
+            { name: 'Normal search', value: 'search' },
+            { name: 'Search with text matching analysis', value: 'analyze' },
+            { name: 'Find exact text matches', value: 'exact' },
+            { name: 'Full debug analysis', value: 'debug' }
+          ],
+          when: (answers) => answers.query.toLowerCase() !== 'exit'
+        }
+      ]);
 
       if (query.toLowerCase() === 'exit') {
         console.log(chalk.blue('👋 Goodbye!'));
         break;
       }
 
-      const spinner = ora(`🔍 Searching...`).start();
-      
       try {
-        const results = await searchEngine.search(query, 5);
-        spinner.stop();
-        this.displaySearchResults(query, results);
+        switch (action) {
+          case 'search':
+            const results = await searchEngine.search(query, 5, { debug });
+            this.displaySearchResults(query, results);
+            break;
+            
+          case 'analyze':
+            const analyzeResults = await searchEngine.search(query, 10, { 
+              debug: true, 
+              includeTextMatches: true 
+            });
+            this.displaySearchResults(query, analyzeResults, true);
+            break;
+            
+          case 'exact':
+            await searchEngine.findExactText(query);
+            break;
+            
+          case 'debug':
+            await searchEngine.analyzeSearch(query);
+            break;
+        }
       } catch (error) {
-        spinner.fail('❌ Search failed');
-        console.log(chalk.red(error.message));
+        console.log(chalk.red(`❌ Operation failed: ${error.message}`));
       }
 
       console.log(); // Add spacing between searches
     }
   }
 
-  displaySearchResults(query, results) {
+  displaySearchResults(query, results, showTextMatches = false) {
     console.log(chalk.blue(`\n🔍 Search Results for: "${query}"\n`));
     
     if (results.length === 0) {
@@ -331,6 +483,12 @@ class RequirementsCLI {
       
       if (result.sheet) {
         console.log(chalk.gray(`   📊 Sheet: ${result.sheet}, Row: ${result.row}`));
+      }
+      
+      if (showTextMatches && result.hasDirectMatch) {
+        console.log(chalk.cyan(`   🎯 Text matches: ${result.textMatches.join(', ')}`));
+      } else if (showTextMatches && !result.hasDirectMatch) {
+        console.log(chalk.yellow(`   ⚠️  No direct text matches found`));
       }
       
       console.log(chalk.gray(`   📄 ${result.preview}`));
@@ -357,6 +515,13 @@ class RequirementsCLI {
       } else {
         console.log(chalk.yellow('\n📭 No documents indexed yet'));
       }
+
+      console.log(chalk.blue('\n🔧 Debugging Commands:'));
+      console.log(chalk.gray('   • Use --debug flag with search for detailed analysis'));
+      console.log(chalk.gray('   • Use "analyze <query>" for comprehensive search analysis'));
+      console.log(chalk.gray('   • Use "find-text <text>" to verify text is indexed'));
+      console.log(chalk.gray('   • Use "debug <query>" for troubleshooting'));
+      
     } catch (error) {
       console.log(chalk.red('❌ No index found or index is corrupted'));
       console.log(chalk.gray('   Run "requirements-search index" to create an index'));
