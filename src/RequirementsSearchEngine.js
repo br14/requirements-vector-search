@@ -12,6 +12,12 @@ class RequirementsSearchEngine {
     this.index = new LocalIndex(indexPath);
     this.openai = new OpenAI({ apiKey: openaiApiKey });
     this.isInitialized = false;
+    this.debugMode = false;
+  }
+
+  // Enable/disable debug mode
+  setDebugMode(enabled = true) {
+    this.debugMode = enabled;
   }
 
   async initialize() {
@@ -56,7 +62,9 @@ class RequirementsSearchEngine {
     
     workbook.SheetNames.forEach(sheetName => {
       const worksheet = workbook.Sheets[sheetName];
-      const range = XLSX.utils.decode_range(worksheet['!ref'] || 'A1:A1');
+      if (!worksheet['!ref']) return; // Skip empty sheets
+      
+      const range = XLSX.utils.decode_range(worksheet['!ref']);
       
       for (let row = range.s.r; row <= range.e.r; row++) {
         const rowData = [];
@@ -126,9 +134,16 @@ class RequirementsSearchEngine {
   // Generate embeddings using OpenAI
   async generateEmbedding(text) {
     try {
+      // Clean and normalize text before embedding
+      const cleanText = text.trim().replace(/\s+/g, ' ');
+      
+      if (this.debugMode) {
+        console.log(`Generating embedding for text (${cleanText.length} chars): ${cleanText.substring(0, 100)}...`);
+      }
+      
       const response = await this.openai.embeddings.create({
         model: 'text-embedding-3-small',
-        input: text,
+        input: cleanText,
         encoding_format: 'float'
       });
       
@@ -143,11 +158,26 @@ class RequirementsSearchEngine {
   async indexDocument(filePath) {
     await this.initialize();
     
+    if (this.debugMode) {
+      console.log(`\n=== Indexing Document: ${filePath} ===`);
+    }
+    
     const extractedData = await this.extractTextFromFile(filePath);
     let totalChunks = 0;
     
     for (const data of extractedData) {
+      if (this.debugMode) {
+        console.log(`Processing ${data.type} content (${data.text.length} chars)`);
+        if (data.sheet) {
+          console.log(`  Sheet: ${data.sheet}, Row: ${data.row}`);
+        }
+      }
+      
       const chunks = this.splitIntoChunks(data.text);
+      
+      if (this.debugMode) {
+        console.log(`Split into ${chunks.length} chunks`);
+      }
       
       // Process chunks in batches to avoid rate limits
       const batchSize = 5;
@@ -160,6 +190,10 @@ class RequirementsSearchEngine {
           const chunkId = data.sheet 
             ? `${data.fileName}_${data.sheet}_row${data.row}_chunk${i + batchIndex}`
             : `${data.fileName}_chunk_${i + batchIndex}`;
+            
+          if (this.debugMode) {
+            console.log(`  Indexing chunk ${chunkId} (${chunk.text.length} chars)`);
+          }
             
           await this.index.insertItem({
             id: chunkId,
@@ -174,7 +208,10 @@ class RequirementsSearchEngine {
               type: data.type,
               sheet: data.sheet || null,
               row: data.row || null,
-              rowRange: data.rowRange || null
+              rowRange: data.rowRange || null,
+              // Add debugging info
+              originalTextLength: data.text.length,
+              chunkStartIndex: chunk.startIndex
             }
           });
         }));
@@ -188,32 +225,236 @@ class RequirementsSearchEngine {
       totalChunks += chunks.length;
     }
     
+    if (this.debugMode) {
+      console.log(`=== Completed indexing: ${totalChunks} chunks created ===\n`);
+    }
+    
     return { fileName: path.basename(filePath), chunksCreated: totalChunks };
   }
 
-  // Search documents using natural language
-  async search(query, topK = 5) {
+  // Enhanced search with debugging capabilities
+  async search(query, topK = 5, options = {}) {
     await this.initialize();
+    
+    const { 
+      debug = this.debugMode,
+      includeTextMatches = false,
+      minScore = 0,
+      showEmbeddingStats = false
+    } = options;
+    
+    if (debug) {
+      console.log(`\n=== Search Debug: "${query}" ===`);
+    }
     
     // Generate embedding for the search query
     const queryEmbedding = await this.generateEmbedding(query);
     
-    // Perform vector similarity search
-    const results = await this.index.queryItems(queryEmbedding, topK);
+    if (debug && showEmbeddingStats) {
+      console.log(`Query embedding dimensions: ${queryEmbedding.length}`);
+      console.log(`Query embedding sample: [${queryEmbedding.slice(0, 5).join(', ')}...]`);
+    }
     
-    // Format results for better readability
-    return results.map(result => ({
-      score: result.score,
-      fileName: result.item.metadata.fileName,
-      text: result.item.metadata.text,
-      preview: result.item.metadata.preview,
-      chunkIndex: result.item.metadata.chunkIndex,
-      relevancePercentage: Math.round(result.score * 100),
-      type: result.item.metadata.type,
-      sheet: result.item.metadata.sheet,
-      row: result.item.metadata.row,
-      rowRange: result.item.metadata.rowRange
-    }));
+    // Perform vector similarity search
+    const results = await this.index.queryItems(queryEmbedding, Math.max(topK * 3, 50)); // Get more for analysis
+    
+    if (debug) {
+      console.log(`Vector search returned ${results.length} raw results`);
+    }
+    
+    // Enhanced result processing with text matching analysis
+    const processedResults = results.map(result => {
+      const metadata = result.item.metadata;
+      const score = result.score;
+      const relevancePercentage = Math.round(score * 100);
+      
+      // Analyze text matches
+      let textMatches = [];
+      let hasDirectMatch = false;
+      
+      if (includeTextMatches) {
+        const queryWords = query.toLowerCase().split(/\s+/);
+        const text = metadata.text.toLowerCase();
+        
+        queryWords.forEach(word => {
+          if (word.length > 2 && text.includes(word)) {
+            textMatches.push(word);
+            hasDirectMatch = true;
+          }
+        });
+      }
+      
+      const processedResult = {
+        score,
+        fileName: metadata.fileName,
+        text: metadata.text,
+        preview: metadata.preview,
+        chunkIndex: metadata.chunkIndex,
+        relevancePercentage,
+        type: metadata.type,
+        sheet: metadata.sheet,
+        row: metadata.row,
+        rowRange: metadata.rowRange
+      };
+      
+      if (includeTextMatches) {
+        processedResult.textMatches = textMatches;
+        processedResult.hasDirectMatch = hasDirectMatch;
+        processedResult.textMatchScore = textMatches.length / query.split(/\s+/).length;
+      }
+      
+      if (debug) {
+        console.log(`Result ${metadata.fileName} (chunk ${metadata.chunkIndex}): ${relevancePercentage}% relevance`);
+        if (includeTextMatches) {
+          console.log(`  Direct matches: ${hasDirectMatch ? textMatches.join(', ') : 'none'}`);
+          console.log(`  Text: "${metadata.text.substring(0, 100)}..."`);
+        }
+      }
+      
+      return processedResult;
+    });
+    
+    // Filter by minimum score if specified
+    let filteredResults = processedResults;
+    if (minScore > 0) {
+      filteredResults = processedResults.filter(r => r.score >= minScore);
+      if (debug) {
+        console.log(`Filtered to ${filteredResults.length} results with score >= ${minScore}`);
+      }
+    }
+    
+    // Sort results - prioritize direct text matches if using text matching
+    if (includeTextMatches) {
+      filteredResults.sort((a, b) => {
+        // First by direct text match
+        if (a.hasDirectMatch && !b.hasDirectMatch) return -1;
+        if (!a.hasDirectMatch && b.hasDirectMatch) return 1;
+        
+        // Then by text match score
+        if (a.textMatchScore !== b.textMatchScore) {
+          return b.textMatchScore - a.textMatchScore;
+        }
+        
+        // Finally by vector similarity
+        return b.score - a.score;
+      });
+    }
+    
+    const finalResults = filteredResults.slice(0, topK);
+    
+    if (debug) {
+      console.log(`=== Final Results (${finalResults.length}/${processedResults.length}) ===`);
+      finalResults.forEach((result, i) => {
+        console.log(`${i + 1}. ${result.fileName} - ${result.relevancePercentage}%`);
+        if (includeTextMatches && result.hasDirectMatch) {
+          console.log(`   Text matches: ${result.textMatches.join(', ')}`);
+        }
+      });
+      console.log('=== End Search Debug ===\n');
+    }
+    
+    return finalResults;
+  }
+
+  // New method: Analyze search results for debugging
+  async analyzeSearch(query, options = {}) {
+    const results = await this.search(query, 20, {
+      ...options,
+      debug: true,
+      includeTextMatches: true,
+      showEmbeddingStats: true
+    });
+    
+    // Group results by file for analysis
+    const fileGroups = {};
+    results.forEach(result => {
+      if (!fileGroups[result.fileName]) {
+        fileGroups[result.fileName] = [];
+      }
+      fileGroups[result.fileName].push(result);
+    });
+    
+    console.log('\n=== SEARCH ANALYSIS REPORT ===');
+    console.log(`Query: "${query}"`);
+    console.log(`Total results: ${results.length}`);
+    console.log(`Files represented: ${Object.keys(fileGroups).length}`);
+    
+    // Analyze text matches vs vector scores
+    const withTextMatches = results.filter(r => r.hasDirectMatch);
+    const withoutTextMatches = results.filter(r => !r.hasDirectMatch);
+    
+    console.log(`\nResults with direct text matches: ${withTextMatches.length}`);
+    console.log(`Results without direct text matches: ${withoutTextMatches.length}`);
+    
+    if (withTextMatches.length > 0) {
+      const avgScoreWithMatches = withTextMatches.reduce((sum, r) => sum + r.score, 0) / withTextMatches.length;
+      console.log(`Average vector score with text matches: ${(avgScoreWithMatches * 100).toFixed(1)}%`);
+    }
+    
+    if (withoutTextMatches.length > 0) {
+      const avgScoreWithoutMatches = withoutTextMatches.reduce((sum, r) => sum + r.score, 0) / withoutTextMatches.length;
+      console.log(`Average vector score without text matches: ${(avgScoreWithoutMatches * 100).toFixed(1)}%`);
+    }
+    
+    console.log('\n=== FILE ANALYSIS ===');
+    Object.entries(fileGroups).forEach(([fileName, fileResults]) => {
+      const hasMatches = fileResults.some(r => r.hasDirectMatch);
+      const maxScore = Math.max(...fileResults.map(r => r.score));
+      console.log(`${fileName}: ${fileResults.length} chunks, max score: ${(maxScore * 100).toFixed(1)}%, has matches: ${hasMatches}`);
+    });
+    
+    console.log('=== END ANALYSIS ===\n');
+    
+    return {
+      query,
+      totalResults: results.length,
+      filesRepresented: Object.keys(fileGroups).length,
+      withTextMatches: withTextMatches.length,
+      withoutTextMatches: withoutTextMatches.length,
+      fileGroups,
+      results
+    };
+  }
+
+  // New method: Find all chunks containing specific text
+  async findExactText(searchText, caseSensitive = false) {
+    await this.initialize();
+    
+    const allItems = await this.index.listItems();
+    const matches = [];
+    
+    allItems.forEach(item => {
+      const text = caseSensitive ? item.metadata.text : item.metadata.text.toLowerCase();
+      const search = caseSensitive ? searchText : searchText.toLowerCase();
+      
+      if (text.includes(search)) {
+        matches.push({
+          fileName: item.metadata.fileName,
+          chunkIndex: item.metadata.chunkIndex,
+          text: item.metadata.text,
+          preview: item.metadata.preview,
+          type: item.metadata.type,
+          sheet: item.metadata.sheet,
+          row: item.metadata.row,
+          id: item.id
+        });
+      }
+    });
+    
+    console.log(`\n=== EXACT TEXT SEARCH: "${searchText}" ===`);
+    console.log(`Found ${matches.length} chunks containing the text`);
+    
+    matches.forEach((match, i) => {
+      console.log(`${i + 1}. ${match.fileName} (chunk ${match.chunkIndex})`);
+      if (match.sheet) {
+        console.log(`   Sheet: ${match.sheet}, Row: ${match.row}`);
+      }
+      console.log(`   Text: "${match.text.substring(0, 200)}..."`);
+    });
+    
+    console.log('=== END EXACT TEXT SEARCH ===\n');
+    
+    return matches;
   }
 
   // Get statistics about the indexed documents
