@@ -1,0 +1,67 @@
+{
+  "name": "requirements-vector-search",
+  "version": "1.0.0",
+  "description": "Natural language search for business requirements documents using Vectra and OpenAI embeddings",
+  "main": "src/RequirementsSearchEngine.js",
+  "bin": {
+    "requirements-search": "./src/cli.js"
+  },
+  "scripts": {
+    "start": "node src/RequirementsSearchEngine.js",
+    "cli": "node src/cli.js",
+    "index": "node src/cli.js index",
+    "search": "node src/cli.js search",
+    "interactive": "node src/cli.js interactive",
+    "status": "node src/cli.js status",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix",
+    "dev": "nodemon src/cli.js"
+  },
+  "dependencies": {
+    "vectra": "^0.9.0",
+    "openai": "^4.28.0",
+    "pdf-parse": "^1.1.1",
+    "mammoth": "^1.6.0",
+    "xlsx": "^0.18.5",
+    "commander": "^11.0.0",
+    "chalk": "^4.1.2",
+    "ora": "^5.4.1",
+    "inquirer": "^8.2.6",
+    "glob": "^10.3.0",
+    "fs-extra": "^11.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "jest": "^29.7.0",
+    "eslint": "^8.57.0",
+    "nodemon": "^3.0.1",
+    "supertest": "^6.3.3"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "keywords": [
+    "vector-search",
+    "requirements",
+    "nlp",
+    "vectra",
+    "openai",
+    "cli",
+    "embeddings",
+    "document-search",
+    "business-requirements",
+    "semantic-search"
+  ],
+  "author": "Your Name <your.email@example.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/br14/requirements-vector-search.git"
+  },
+  "bugs": {
+    "url": "https://github.com/br14/requirements-vector-search/issues"
+  },
+  "homepage": "https://github.com/br14/requirements-vector-search#readme"
+}
